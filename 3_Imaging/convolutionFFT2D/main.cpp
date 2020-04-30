@@ -96,8 +96,19 @@ bool test0(void)
     fftPlanInv;
 
     bool bRetVal;
-    StopWatchInterface *hTimer = NULL;
-    sdkCreateTimer(&hTimer);
+
+    // Allocate CUDA events that we'll use for timing
+    cudaEvent_t start;
+    checkCudaErrors(cudaEventCreate(&start));
+
+    cudaEvent_t stop;
+    checkCudaErrors(cudaEventCreate(&stop));
+
+    cudaEvent_t start_kernel;
+    checkCudaErrors(cudaEventCreate(&start_kernel));
+
+    cudaEvent_t stop_kernel;
+    checkCudaErrors(cudaEventCreate(&stop_kernel));
 
     printf("Testing built-in R2C / C2R FFT-based convolution\n");
     const int kernelH = 7;
@@ -115,15 +126,6 @@ bool test0(void)
     h_ResultCPU = (float *)malloc(dataH   * dataW * sizeof(float));
     h_ResultGPU = (float *)malloc(fftH    * fftW * sizeof(float));
 
-    checkCudaErrors(cudaMalloc((void **)&d_Data,   dataH   * dataW   * sizeof(float)));
-    checkCudaErrors(cudaMalloc((void **)&d_Kernel, kernelH * kernelW * sizeof(float)));
-
-    checkCudaErrors(cudaMalloc((void **)&d_PaddedData,   fftH * fftW * sizeof(float)));
-    checkCudaErrors(cudaMalloc((void **)&d_PaddedKernel, fftH * fftW * sizeof(float)));
-
-    checkCudaErrors(cudaMalloc((void **)&d_DataSpectrum,   fftH * (fftW / 2 + 1) * sizeof(fComplex)));
-    checkCudaErrors(cudaMalloc((void **)&d_KernelSpectrum, fftH * (fftW / 2 + 1) * sizeof(fComplex)));
-
     printf("...generating random input data\n");
     srand(2010);
 
@@ -136,6 +138,18 @@ bool test0(void)
     {
         h_Kernel[i] = getRand();
     }
+
+    // Record the start event
+    checkCudaErrors(cudaEventRecord(start, NULL));
+
+    checkCudaErrors(cudaMalloc((void **)&d_Data,   dataH   * dataW   * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&d_Kernel, kernelH * kernelW * sizeof(float)));
+
+    checkCudaErrors(cudaMalloc((void **)&d_PaddedData,   fftH * fftW * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&d_PaddedKernel, fftH * fftW * sizeof(float)));
+
+    checkCudaErrors(cudaMalloc((void **)&d_DataSpectrum,   fftH * (fftW / 2 + 1) * sizeof(fComplex)));
+    checkCudaErrors(cudaMalloc((void **)&d_KernelSpectrum, fftH * (fftW / 2 + 1) * sizeof(fComplex)));
 
     printf("...creating R2C & C2R FFT plans for %i x %i\n", fftH, fftW);
     checkCudaErrors(cufftPlan2d(&fftPlanFwd, fftH, fftW, CUFFT_R2C));
@@ -171,26 +185,42 @@ bool test0(void)
         kernelX
     );
 
-    //Not including kernel transformation into time measurement,
-    //since convolution kernel is not changed very frequently
+    // Record the start_kernel event
+    checkCudaErrors(cudaEventRecord(start_kernel, NULL));
+
     printf("...transforming convolution kernel\n");
     checkCudaErrors(cufftExecR2C(fftPlanFwd, (cufftReal *)d_PaddedKernel, (cufftComplex *)d_KernelSpectrum));
 
     printf("...running GPU FFT convolution: ");
     checkCudaErrors(cudaDeviceSynchronize());
-    sdkResetTimer(&hTimer);
-    sdkStartTimer(&hTimer);
     checkCudaErrors(cufftExecR2C(fftPlanFwd, (cufftReal *)d_PaddedData, (cufftComplex *)d_DataSpectrum));
     modulateAndNormalize(d_DataSpectrum, d_KernelSpectrum, fftH, fftW, 1);
     checkCudaErrors(cufftExecC2R(fftPlanInv, (cufftComplex *)d_DataSpectrum, (cufftReal *)d_PaddedData));
 
     checkCudaErrors(cudaDeviceSynchronize());
-    sdkStopTimer(&hTimer);
-    double gpuTime = sdkGetTimerValue(&hTimer);
-    printf("%f MPix/s (%f ms)\n", (double)dataH * (double)dataW * 1e-6 / (gpuTime * 0.001), gpuTime);
+
+    // Record the stop_kernel event
+    checkCudaErrors(cudaEventRecord(stop_kernel, NULL));
 
     printf("...reading back GPU convolution results\n");
     checkCudaErrors(cudaMemcpy(h_ResultGPU, d_PaddedData, fftH * fftW * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Record the stop event
+    checkCudaErrors(cudaEventRecord(stop, NULL));
+
+    // Wait for the stop_kernel event to complete
+    checkCudaErrors(cudaEventSynchronize(stop_kernel));
+    // Wait for the stop event to complete
+    checkCudaErrors(cudaEventSynchronize(stop));
+
+    float msecKernel = 0.0f;
+    checkCudaErrors(cudaEventElapsedTime(&msecKernel, start_kernel, stop_kernel));
+    float msecTotal = 0.0f;
+    checkCudaErrors(cudaEventElapsedTime(&msecTotal, start, stop));
+
+    // Compute and print the performance
+    printf("Kernel Time = %.3f msec\n", msecKernel);
+    printf("Total Time  = %.3f msec\n", msecTotal);
 
     printf("...running reference CPU convolution\n");
     convolutionClampToBorderCPU(
@@ -233,7 +263,6 @@ bool test0(void)
     printf(bRetVal ? "L2norm Error OK\n" : "L2norm Error too high!\n");
 
     printf("...shutting down\n");
-    sdkDeleteTimer(&hTimer);
 
     checkCudaErrors(cufftDestroy(fftPlanInv));
     checkCudaErrors(cufftDestroy(fftPlanFwd));
@@ -276,8 +305,19 @@ bool  test1(void)
     cufftHandle fftPlan;
 
     bool bRetVal;
-    StopWatchInterface *hTimer = NULL;
-    sdkCreateTimer(&hTimer);
+
+    // Allocate CUDA events that we'll use for timing
+    cudaEvent_t start;
+    checkCudaErrors(cudaEventCreate(&start));
+
+    cudaEvent_t stop;
+    checkCudaErrors(cudaEventCreate(&stop));
+
+    cudaEvent_t start_kernel;
+    checkCudaErrors(cudaEventCreate(&start_kernel));
+
+    cudaEvent_t stop_kernel;
+    checkCudaErrors(cudaEventCreate(&stop_kernel));
 
     printf("Testing custom R2C / C2R FFT-based convolution\n");
     const uint fftPadding = 16;
@@ -296,17 +336,6 @@ bool  test1(void)
     h_ResultCPU = (float *)malloc(dataH   * dataW * sizeof(float));
     h_ResultGPU = (float *)malloc(fftH    * fftW * sizeof(float));
 
-    checkCudaErrors(cudaMalloc((void **)&d_Data,   dataH   * dataW   * sizeof(float)));
-    checkCudaErrors(cudaMalloc((void **)&d_Kernel, kernelH * kernelW * sizeof(float)));
-
-    checkCudaErrors(cudaMalloc((void **)&d_PaddedData,   fftH * fftW * sizeof(float)));
-    checkCudaErrors(cudaMalloc((void **)&d_PaddedKernel, fftH * fftW * sizeof(float)));
-
-    checkCudaErrors(cudaMalloc((void **)&d_DataSpectrum0,   fftH * (fftW / 2) * sizeof(fComplex)));
-    checkCudaErrors(cudaMalloc((void **)&d_KernelSpectrum0, fftH * (fftW / 2) * sizeof(fComplex)));
-    checkCudaErrors(cudaMalloc((void **)&d_DataSpectrum,    fftH * (fftW / 2 + fftPadding) * sizeof(fComplex)));
-    checkCudaErrors(cudaMalloc((void **)&d_KernelSpectrum,  fftH * (fftW / 2 + fftPadding) * sizeof(fComplex)));
-
     printf("...generating random input data\n");
     srand(2010);
 
@@ -319,6 +348,20 @@ bool  test1(void)
     {
         h_Kernel[i] = getRand();
     }
+
+    // Record the start event
+    checkCudaErrors(cudaEventRecord(start, NULL));
+
+    checkCudaErrors(cudaMalloc((void **)&d_Data,   dataH   * dataW   * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&d_Kernel, kernelH * kernelW * sizeof(float)));
+
+    checkCudaErrors(cudaMalloc((void **)&d_PaddedData,   fftH * fftW * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&d_PaddedKernel, fftH * fftW * sizeof(float)));
+
+    checkCudaErrors(cudaMalloc((void **)&d_DataSpectrum0,   fftH * (fftW / 2) * sizeof(fComplex)));
+    checkCudaErrors(cudaMalloc((void **)&d_KernelSpectrum0, fftH * (fftW / 2) * sizeof(fComplex)));
+    checkCudaErrors(cudaMalloc((void **)&d_DataSpectrum,    fftH * (fftW / 2 + fftPadding) * sizeof(fComplex)));
+    checkCudaErrors(cudaMalloc((void **)&d_KernelSpectrum,  fftH * (fftW / 2 + fftPadding) * sizeof(fComplex)));
 
     printf("...creating C2C FFT plan for %i x %i\n", fftH, fftW / 2);
     checkCudaErrors(cufftPlan2d(&fftPlan, fftH, fftW / 2, CUFFT_C2C));
@@ -353,19 +396,18 @@ bool  test1(void)
         kernelX
     );
 
+    // Record the start_kernel event
+    checkCudaErrors(cudaEventRecord(start_kernel, NULL));
+
     //CUFFT_INVERSE works just as well...
     const int FFT_DIR = CUFFT_FORWARD;
 
-    //Not including kernel transformation into time measurement,
-    //since convolution kernel is not changed very frequently
     printf("...transforming convolution kernel\n");
     checkCudaErrors(cufftExecC2C(fftPlan, (cufftComplex *)d_PaddedKernel, (cufftComplex *)d_KernelSpectrum0, FFT_DIR));
     spPostprocess2D(d_KernelSpectrum, d_KernelSpectrum0, fftH, fftW / 2, fftPadding, FFT_DIR);
 
     printf("...running GPU FFT convolution: ");
     checkCudaErrors(cudaDeviceSynchronize());
-    sdkResetTimer(&hTimer);
-    sdkStartTimer(&hTimer);
 
     checkCudaErrors(cufftExecC2C(fftPlan, (cufftComplex *)d_PaddedData, (cufftComplex *)d_DataSpectrum0, FFT_DIR));
 
@@ -376,12 +418,29 @@ bool  test1(void)
     checkCudaErrors(cufftExecC2C(fftPlan, (cufftComplex *)d_DataSpectrum0, (cufftComplex *)d_PaddedData, -FFT_DIR));
 
     checkCudaErrors(cudaDeviceSynchronize());
-    sdkStopTimer(&hTimer);
-    double gpuTime = sdkGetTimerValue(&hTimer);
-    printf("%f MPix/s (%f ms)\n", (double)dataH * (double)dataW * 1e-6 / (gpuTime * 0.001), gpuTime);
+
+    // Record the stop_kernel event
+    checkCudaErrors(cudaEventRecord(stop_kernel, NULL));
 
     printf("...reading back GPU FFT results\n");
     checkCudaErrors(cudaMemcpy(h_ResultGPU, d_PaddedData, fftH * fftW * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Record the stop event
+    checkCudaErrors(cudaEventRecord(stop, NULL));
+
+    // Wait for the stop_kernel event to complete
+    checkCudaErrors(cudaEventSynchronize(stop_kernel));
+    // Wait for the stop event to complete
+    checkCudaErrors(cudaEventSynchronize(stop));
+
+    float msecKernel = 0.0f;
+    checkCudaErrors(cudaEventElapsedTime(&msecKernel, start_kernel, stop_kernel));
+    float msecTotal = 0.0f;
+    checkCudaErrors(cudaEventElapsedTime(&msecTotal, start, stop));
+
+    // Compute and print the performance
+    printf("Kernel Time = %.3f msec\n", msecKernel);
+    printf("Total Time  = %.3f msec\n", msecTotal);
 
     printf("...running reference CPU convolution\n");
     convolutionClampToBorderCPU(
@@ -424,7 +483,6 @@ bool  test1(void)
     printf(bRetVal ? "L2norm Error OK\n" : "L2norm Error too high!\n");
 
     printf("...shutting down\n");
-    sdkDeleteTimer(&hTimer);
     checkCudaErrors(cufftDestroy(fftPlan));
 
     checkCudaErrors(cudaFree(d_KernelSpectrum));
@@ -466,8 +524,19 @@ bool test2(void)
     fftPlan;
 
     bool bRetVal;
-    StopWatchInterface *hTimer = NULL;
-    sdkCreateTimer(&hTimer);
+
+    // Allocate CUDA events that we'll use for timing
+    cudaEvent_t start;
+    checkCudaErrors(cudaEventCreate(&start));
+
+    cudaEvent_t stop;
+    checkCudaErrors(cudaEventCreate(&stop));
+
+    cudaEvent_t start_kernel;
+    checkCudaErrors(cudaEventCreate(&start_kernel));
+
+    cudaEvent_t stop_kernel;
+    checkCudaErrors(cudaEventCreate(&stop_kernel));
 
     printf("Testing updated custom R2C / C2R FFT-based convolution\n");
     const int kernelH = 7;
@@ -485,15 +554,6 @@ bool test2(void)
     h_ResultCPU = (float *)malloc(dataH   * dataW * sizeof(float));
     h_ResultGPU = (float *)malloc(fftH    * fftW * sizeof(float));
 
-    checkCudaErrors(cudaMalloc((void **)&d_Data,   dataH   * dataW   * sizeof(float)));
-    checkCudaErrors(cudaMalloc((void **)&d_Kernel, kernelH * kernelW * sizeof(float)));
-
-    checkCudaErrors(cudaMalloc((void **)&d_PaddedData,   fftH * fftW * sizeof(float)));
-    checkCudaErrors(cudaMalloc((void **)&d_PaddedKernel, fftH * fftW * sizeof(float)));
-
-    checkCudaErrors(cudaMalloc((void **)&d_DataSpectrum0,   fftH * (fftW / 2) * sizeof(fComplex)));
-    checkCudaErrors(cudaMalloc((void **)&d_KernelSpectrum0, fftH * (fftW / 2) * sizeof(fComplex)));
-
     printf("...generating random input data\n");
     srand(2010);
 
@@ -506,6 +566,18 @@ bool test2(void)
     {
         h_Kernel[i] = getRand();
     }
+
+    // Record the start event
+    checkCudaErrors(cudaEventRecord(start, NULL));
+
+    checkCudaErrors(cudaMalloc((void **)&d_Data,   dataH   * dataW   * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&d_Kernel, kernelH * kernelW * sizeof(float)));
+
+    checkCudaErrors(cudaMalloc((void **)&d_PaddedData,   fftH * fftW * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&d_PaddedKernel, fftH * fftW * sizeof(float)));
+
+    checkCudaErrors(cudaMalloc((void **)&d_DataSpectrum0,   fftH * (fftW / 2) * sizeof(fComplex)));
+    checkCudaErrors(cudaMalloc((void **)&d_KernelSpectrum0, fftH * (fftW / 2) * sizeof(fComplex)));
 
     printf("...creating C2C FFT plan for %i x %i\n", fftH, fftW / 2);
     checkCudaErrors(cufftPlan2d(&fftPlan, fftH, fftW / 2, CUFFT_C2C));
@@ -540,30 +612,46 @@ bool test2(void)
         kernelX
     );
 
+    // Record the start_kernel event
+    checkCudaErrors(cudaEventRecord(start_kernel, NULL));
+
     //CUFFT_INVERSE works just as well...
     const int FFT_DIR = CUFFT_FORWARD;
 
-    //Not including kernel transformation into time measurement,
-    //since convolution kernel is not changed very frequently
     printf("...transforming convolution kernel\n");
     checkCudaErrors(cufftExecC2C(fftPlan, (cufftComplex *)d_PaddedKernel, (cufftComplex *)d_KernelSpectrum0, FFT_DIR));
 
     printf("...running GPU FFT convolution: ");
     checkCudaErrors(cudaDeviceSynchronize());
-    sdkResetTimer(&hTimer);
-    sdkStartTimer(&hTimer);
 
     checkCudaErrors(cufftExecC2C(fftPlan, (cufftComplex *)d_PaddedData, (cufftComplex *)d_DataSpectrum0, FFT_DIR));
     spProcess2D(d_DataSpectrum0, d_DataSpectrum0, d_KernelSpectrum0, fftH, fftW / 2, FFT_DIR);
     checkCudaErrors(cufftExecC2C(fftPlan, (cufftComplex *)d_DataSpectrum0, (cufftComplex *)d_PaddedData, -FFT_DIR));
 
     checkCudaErrors(cudaDeviceSynchronize());
-    sdkStopTimer(&hTimer);
-    double gpuTime = sdkGetTimerValue(&hTimer);
-    printf("%f MPix/s (%f ms)\n", (double)dataH * (double)dataW * 1e-6 / (gpuTime * 0.001), gpuTime);
+
+    // Record the stop_kernel event
+    checkCudaErrors(cudaEventRecord(stop_kernel, NULL));
 
     printf("...reading back GPU FFT results\n");
     checkCudaErrors(cudaMemcpy(h_ResultGPU, d_PaddedData, fftH * fftW * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Record the stop event
+    checkCudaErrors(cudaEventRecord(stop, NULL));
+
+    // Wait for the stop_kernel event to complete
+    checkCudaErrors(cudaEventSynchronize(stop_kernel));
+    // Wait for the stop event to complete
+    checkCudaErrors(cudaEventSynchronize(stop));
+
+    float msecKernel = 0.0f;
+    checkCudaErrors(cudaEventElapsedTime(&msecKernel, start_kernel, stop_kernel));
+    float msecTotal = 0.0f;
+    checkCudaErrors(cudaEventElapsedTime(&msecTotal, start, stop));
+
+    // Compute and print the performance
+    printf("Kernel Time = %.3f msec\n", msecKernel);
+    printf("Total Time  = %.3f msec\n", msecTotal);
 
     printf("...running reference CPU convolution\n");
     convolutionClampToBorderCPU(
@@ -608,7 +696,6 @@ bool test2(void)
     printf(bRetVal ? "L2norm Error OK\n" : "L2norm Error too high!\n");
 
     printf("...shutting down\n");
-    sdkDeleteTimer(&hTimer);
     checkCudaErrors(cufftDestroy(fftPlan));
 
     checkCudaErrors(cudaFree(d_KernelSpectrum0));
